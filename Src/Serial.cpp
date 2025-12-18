@@ -195,6 +195,7 @@ char *	Serial::test_for_rx_message	()	{	//	Read in any received chars into linea
 					write	("INPUT_OVERRUN_ERROR\r\n", 21);
 					clear_error	(SerialErrors::INPUT_OVERRUN);
 				}	//	End of if	(test_error(SerialErrors::INPUT_OVERRUN))	{
+				time_ms_of_most_recent_rx = HAL_GetTick();
 				return	(lin_inbuff);			//	Got '\r' command terminator
 
 			}	//	End of if(ch[0] == '\r')	{
