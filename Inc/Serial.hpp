@@ -221,6 +221,9 @@ class	Serial	{
 //	char		ring_outbuff	[DEFAULT_RING_OUTBUFF_SIZE + 4] {0};	//	Linear, not circular, output buffer
 	char	*	ring_outbuff ;
 	char		live_tx_buff	[LIVE_TXBUFF_SIZE + 4] 	{0};	//	linear buffer handed to DMA Transmit
+
+	uint32_t	time_ms_of_most_recent_rx { 0 }	;	//	added 19th Aug 2025
+
 	uint8_t		ch[4] {0};
 	uint32_t	lin_inbuff_onptr 	{0L};
 	uint32_t	ring_outbuff_onptr 	{0L};
@@ -265,6 +268,7 @@ public:
 //	bool	g202507_get	(uint8_t & a)	;
 	bool	get	(uint8_t & a)	;
 	bool	read	(uint8_t * buff, size_t & len)	;
+	uint32_t	when	()	{	return	(time_ms_of_most_recent_rx);	}
 
 }	;
 
