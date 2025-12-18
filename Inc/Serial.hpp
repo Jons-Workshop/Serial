@@ -1,12 +1,18 @@
 #pragma once
 /*
- * Serial.hpp	-	Update	-	December 2024
+ * Serial.hpp  Created on: Jun 13, 2023	-	Update	-	18th December 2025
  *
- *  Created on: Jun 13, 2023
  *      Author: Jon Freeman  B Eng (Hons) MIET
+ *      NOTE This does NOT initialise hardware.
+ *      To use any uart you must first initialise hardware, baud, parity etc by setting up UART and DMA in .ioc file
  *
- *      LAST MODIFIED 13th September 2025
- *      Incorporated CircularBuffer from Serial25.hpp
+ *	Use	-		Serial	my_port	(UART_HandleTypeDef &which_port)	;	//	Use default tx buffer size
+ *	Use	-		Serial	my_port	(UART_HandleTypeDef &which_port, tx_buffsize)	;
+ *	e.g.		Serial	pc	(huart2, 3000);
+ *
+ *      LAST MODIFIED 18th December 2025
+ *
+	//	Do NOT call 'start_rx' functions until after 'main ()' has started
  *
  *      Oct 2024
  *      DMA Usage
@@ -23,9 +29,9 @@
 #include	<new>	//	needed to handle std::nothrow
 
 template <class T>	class	CircularBuffer	{	//	Class to manage circular buffer of type T objects
-//	const	size_t	buffsize;					//	Initialised by parameter 's' brought to Constructor
-	const	size_t	buffsize=100;					//	Initialised by parameter 's' brought to Constructor
-	T *	buffer = new (std::nothrow) T[buffsize] { 0 };	//	Allocate and initialise buffer space if possible
+	const	size_t	buffsize;					//	Initialised by parameter 's' brought to Constructor
+//	T *	buffer = new (std::nothrow) T[100] { 0 };	//	Allocate and initialise buffer space if possible
+	T * buffer;	//	properly created by constructor
 	bool	full	{ false };
 	size_t	onptr	{ 0L };
 	size_t	offptr	{ 0L };
@@ -34,11 +40,14 @@ template <class T>	class	CircularBuffer	{	//	Class to manage circular buffer of 
 public:
 
 	CircularBuffer	()	{
+		buffer = new (std::nothrow) T[100] { 0 }	;
         if (buffer == nullptr) {
             errors = 1;				//	Flag fatal buffer allocation failure
         }
 	}                          // Default constructor
-	CircularBuffer	(const size_t s) : buffsize { s }	{
+	CircularBuffer	(const size_t s)
+		: buffsize { s }	{
+		buffer = new (std::nothrow) T[buffsize] { 0 }	;
         if (buffer == nullptr) {
             errors = 1;				//	Flag fatal buffer allocation failure
         }
@@ -198,17 +207,20 @@ class	Serial	{
 #define		MAX_NUMOF_UARTS		4
 
 #define		LIVE_TXBUFF_SIZE	500	//	This many chars max passed per DMA Transmit
-#define		LIN_INBUFF_SIZE		250		//	Long enough for longest command line
-#define		RING_OUTBUFF_SIZE	2600	//	Large as possible but not silly - buffer overrun issue resolved !
+#define		DEFAULT_LIN_INBUFF_SIZE		250		//	Long enough for longest command line
+#define		DEFAULT_RING_OUTBUFF_SIZE	2600	//	Large as possible but not silly - buffer overrun issue resolved !
 
 	UART_HandleTypeDef * const m_huartn	;		//	Which hardware usart
-
+	const		size_t	tx_ringbuff_size = DEFAULT_RING_OUTBUFF_SIZE;
+	const		size_t	rx_ringbuff_size = DEFAULT_LIN_INBUFF_SIZE;
 	volatile	bool	tx_buff_empty 	{ true };
 	volatile	bool	tx_busy 		{ false };
 
-	char		lin_inbuff		[LIN_INBUFF_SIZE + 4] 	{0};	//	Command line, not circular buffer
-	char		ring_outbuff	[RING_OUTBUFF_SIZE + 4] {0};	//	Linear, not circular, output buffer
-	char		live_tx_buff	[LIVE_TXBUFF_SIZE + 4] 	{0};	//	buffer handed to DMA Transmit
+//	char		lin_inbuff		[DEFAULT_LIN_INBUFF_SIZE + 4] 	{0};	//	Command line, not circular buffer
+	char	*	lin_inbuff	;//	[DEFAULT_LIN_INBUFF_SIZE + 4] 	{0};	//	Command line, not circular buffer
+//	char		ring_outbuff	[DEFAULT_RING_OUTBUFF_SIZE + 4] {0};	//	Linear, not circular, output buffer
+	char	*	ring_outbuff ;
+	char		live_tx_buff	[LIVE_TXBUFF_SIZE + 4] 	{0};	//	linear buffer handed to DMA Transmit
 	uint8_t		ch[4] {0};
 	uint32_t	lin_inbuff_onptr 	{0L};
 	uint32_t	ring_outbuff_onptr 	{0L};
@@ -222,10 +234,20 @@ class	Serial	{
 	uint32_t	serial_error_history{0L};	//	Dec 2024 no use made of this yet
 	uint8_t		rxbuff	[2] {0};			//	Rx DMA places 1 byte here. ISR copies this to circular buffer
 
-	CircularBuffer	<uint8_t>	newRx	;	//	Defined fully above
-
+//	CircularBuffer	<uint8_t>	newRx;	//	Defined fully above
+//	CircularBuffer	<uint8_t>	newRx	{DEFAULT_LIN_INBUFF_SIZE};	//	Defined fully above
+	CircularBuffer	<uint8_t>	newRx	{rx_ringbuff_size};	//	Defined fully above
 public:
-	Serial	(UART_HandleTypeDef &wot_port)	;	//	:	m_huartn {&wot_port}
+
+	void	Constructor_Core	()	;
+
+	~Serial	()	{
+		delete	lin_inbuff;
+		delete	ring_outbuff;
+	}
+
+	Serial	(UART_HandleTypeDef &which_port)	;	//	:	m_huartn {&which_port}
+	Serial	(UART_HandleTypeDef &which_port, const size_t tx_buffsize)	;	//	:	m_huartn {&which_port}
 
 	char *	test_for_rx_message	();	//	Returns buffer address on receiving '\r', presumably at end of command string, NULL otherwise
 	bool	write	(const uint8_t * t, int32_t len)	;	//	Puts all on buffer. Transmit only once per ms

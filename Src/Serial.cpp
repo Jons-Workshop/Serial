@@ -1,10 +1,10 @@
 /*
- * Serial.cpp	-	Update	-	December 2024
+ * Serial.cpp	-	Update	-	December 2025
  *
  *  Created on: Jun 13, 2023
  *      Author: Jon Freeman  B Eng (Hons) MIET
  *
- *      LAST MODIFIED 13th September 2025
+ *      LAST MODIFIED 18th December 2025
  */
 
 #include	<cstdio>
@@ -34,13 +34,7 @@ void	myportsreport	()	{
 }
 #endif
 
-Serial::Serial	(UART_HandleTypeDef &wot_port)	//	Constructor
-	:	m_huartn {&wot_port}
-{	//	Constructor
-//	newRx	{RXBUFF_SIZE}	;
-	//	Tempting to 'start_rx' from here but no, it's too soon !
-	//	Do NOT call 'start_rx' functions until after 'main ()' has started
-//	CircularBuffer	<uint8_t>	newRx (RXBUFF_SIZE)	;	//	Defined fully in "circbuff.hpp", no .cpp code
+void	Serial::Constructor_Core	()	{
 	int i = 0;
 	while	(i < MAX_NUMOF_UARTS)	{
 		if	(!(MySerialPorts[i].uart))	{	//got empty slot
@@ -50,6 +44,27 @@ Serial::Serial	(UART_HandleTypeDef &wot_port)	//	Constructor
 		}
 		i++;
 	}
+    if (ring_outbuff == nullptr) {
+        serial_error |= 1;				//	Flag fatal buffer allocation failure
+    }
+}
+
+
+Serial::Serial	(UART_HandleTypeDef &which_port)	//	Constructor
+	:	m_huartn {&which_port}
+{	//	Constructor
+	lin_inbuff 		= new (std::nothrow) char[DEFAULT_LIN_INBUFF_SIZE + 4] { 0 }	;
+	ring_outbuff 	= new (std::nothrow) char[DEFAULT_RING_OUTBUFF_SIZE + 4] { 0 }	;
+	Constructor_Core	()	;
+}	//	End of constructor
+
+Serial::Serial	(UART_HandleTypeDef &which_port, const size_t tx_buffsize)
+	: m_huartn {&which_port}
+	, tx_ringbuff_size {tx_buffsize} 	//	Constructor
+{
+	lin_inbuff 		= new (std::nothrow) char[DEFAULT_LIN_INBUFF_SIZE + 4] { 0 }	;
+	ring_outbuff 	= new (std::nothrow) char[tx_ringbuff_size + 4] { 0 }	;
+	Constructor_Core	()	;
 }	//	End of constructor
 
 
@@ -134,7 +149,7 @@ bool	Serial::read	(uint8_t * buff, size_t & max_len)	{
  */
 char *	Serial::test_for_rx_message	()	{	//	Read in any received chars into linear command line buffer
 	while	(newRx.get(ch[0]))	{			//	While there are received chars to be processed
-		if	(lin_inbuff_onptr >= LIN_INBUFF_SIZE)	{	//
+		if	(lin_inbuff_onptr >= DEFAULT_LIN_INBUFF_SIZE)	{	//
 			ch[0] = '\r';		//	Prevent command line buffer overrun
 			set_error (SerialErrors::INPUT_OVERRUN);	//	set error flag
 		}
@@ -242,7 +257,8 @@ bool	Serial::write	(const uint8_t * source, int32_t len)	{	//	Only puts chars on
 		return	(false);			//	Can not send fewer than 1 chars !
 	int32_t	buff_space = ring_outbuff_offptr - ring_outbuff_onptr;
 	if	(buff_space <= 0)
-		buff_space += RING_OUTBUFF_SIZE;
+//		buff_space += DEFAULT_RING_OUTBUFF_SIZE;
+		buff_space += tx_ringbuff_size;
 	if	(buff_space < len)	{
 		set_error (SerialErrors::OUTPUT_OVERRUN);	//	Have proved this works
 		return	(false);							//	Not room to send whole message so send none of it
@@ -270,7 +286,8 @@ bool	Serial::write	(const uint8_t * source, int32_t len)	{	//	Only puts chars on
 	size_t	cntjuly25 = 0;		//	This works !
 	while	(len--)	{
 		*(ring_outbuff + ring_outbuff_onptr) = source[cntjuly25++];
-		++ring_outbuff_onptr %= RING_OUTBUFF_SIZE;
+//		++ring_outbuff_onptr %= DEFAULT_RING_OUTBUFF_SIZE;
+		++ring_outbuff_onptr %= tx_ringbuff_size;
 	}
 
 	tx_buff_empty = false;
@@ -294,7 +311,8 @@ bool	Serial::tx_any_buffered	()	{	//	Call this often from forever loop
 		//
 		live_tx_buff[ len++ ] = ring_outbuff[ring_outbuff_offptr++];
 //		tx_buff_full = false;
-		ring_outbuff_offptr %= RING_OUTBUFF_SIZE;		//	circular buffer
+//		ring_outbuff_offptr %= DEFAULT_RING_OUTBUFF_SIZE;		//	circular buffer
+		ring_outbuff_offptr %= tx_ringbuff_size;		//	circular buffer
 		if(ring_outbuff_onptr == ring_outbuff_offptr)
 			tx_buff_empty = true;
 	}
