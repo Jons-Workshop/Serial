@@ -1,10 +1,12 @@
 /*
- * Serial.cpp	-	Update	-	December 2025
+ * Serial.cpp	-	Update	-	19th August 2026
+ * FIXED problem with tx buffer overrun - see write
+ * Now using CircularBuffer objects in Tx and Rx (tidier)
  *
  *  Created on: Jun 13, 2023
  *      Author: Jon Freeman  B Eng (Hons) MIET
  *
- *      LAST MODIFIED 18th December 2025
+ *      LAST MODIFIED 19th August 2026
  */
 
 #include	<cstdio>
@@ -35,6 +37,9 @@ void	myportsreport	()	{
 #endif
 
 void	Serial::Constructor_Core	()	{
+	if	((nullptr == lin_inbuff) || (nullptr == lin_tx_buff))
+		serial_error |= 1;				//	Flag fatal buffer allocation failure
+		//while	(1)	{}	;	//	Hang. Memory allocation failed. System too sick to do anything useful, not even report error message !
 	int i = 0;
 	while	(i < MAX_NUMOF_UARTS)	{
 		if	(!(MySerialPorts[i].uart))	{	//got empty slot
@@ -44,17 +49,15 @@ void	Serial::Constructor_Core	()	{
 		}
 		i++;
 	}
-    if (ring_outbuff == nullptr) {
-        serial_error |= 1;				//	Flag fatal buffer allocation failure
-    }
 }
 
 
+//	live_tx_buff and ring_outbuff are the same size
 Serial::Serial	(UART_HandleTypeDef &which_port)	//	Constructor
 	:	m_huartn {&which_port}
 {	//	Constructor
 	lin_inbuff 		= new (std::nothrow) char[DEFAULT_LIN_INBUFF_SIZE + 4] { 0 }	;
-	ring_outbuff 	= new (std::nothrow) char[DEFAULT_RING_OUTBUFF_SIZE + 4] { 0 }	;
+	lin_tx_buff		= new (std::nothrow) char[DEFAULT_RING_OUTBUFF_SIZE + 4] { 0 }	;
 	Constructor_Core	()	;
 }	//	End of constructor
 
@@ -63,15 +66,30 @@ Serial::Serial	(UART_HandleTypeDef &which_port, const size_t tx_buffsize)
 	, tx_ringbuff_size {tx_buffsize} 	//	Constructor
 {
 	lin_inbuff 		= new (std::nothrow) char[DEFAULT_LIN_INBUFF_SIZE + 4] { 0 }	;
-	ring_outbuff 	= new (std::nothrow) char[tx_ringbuff_size + 4] { 0 }	;
+	lin_tx_buff		= new (std::nothrow) char[tx_ringbuff_size + 4] { 0 }	;
+	Constructor_Core	()	;
+}	//	End of constructor
+
+
+Serial::Serial	(UART_HandleTypeDef &which_port, const size_t tx_buffsize, const size_t rx_buffsize)
+	: m_huartn {&which_port}
+	, tx_ringbuff_size {tx_buffsize} 	//	Constructor
+	, rx_ringbuff_size {rx_buffsize} 	//	Constructor
+{
+	lin_inbuff 		= new (std::nothrow) char[rx_ringbuff_size + 4] { 0 }	;
+	lin_tx_buff		= new (std::nothrow) char[tx_ringbuff_size + 4] { 0 }	;
 	Constructor_Core	()	;
 }	//	End of constructor
 
 
 bool	Serial::start_rx	()	{	//	Call from startup function. Call from constructor fails, Too Early !
+#ifdef	USING_RX_DMA
 	if	(HAL_OK == HAL_UART_Receive_DMA	(m_huartn, rxbuff, 1))	//	huartn and rxbuff 'private'
+#else
+	if	(HAL_OK == HAL_UART_Receive_IT	(m_huartn, rxbuff, 1))	//	huartn and rxbuff 'private'
+#endif
 		return	(true);
-	set_error	(SerialErrors::HAL_UART);
+	set_error	(HAL_UART_RX);
 	return	(false);
 }
 
@@ -111,7 +129,7 @@ void	special_char_handler	(char	c)	{
 }
 
 bool	Serial::get	(uint8_t & a)	{	//	If char avail, is copied into 'a' and returns true. Returns false if no char available
-	return	(newRx.get(a));
+	return	(RxCBuff.get(a));
 }
 
 /**	bool	Serial::read	(uint8_t * buff, size_t & max_len)
@@ -124,21 +142,18 @@ bool	Serial::get	(uint8_t & a)	{	//	If char avail, is copied into 'a' and return
  */
 bool	Serial::read	(uint8_t * buff, size_t & max_len)	{
 	size_t	posn = 0;
-	if	(newRx.empty())	{
+	if	(RxCBuff.empty())	{
 		max_len = 0;
 		return	(false)	;
 	}
 	buff[0] = 0;
-	while	((posn < max_len) && (newRx.get(buff[posn])))	{
+	while	((posn < max_len) && (RxCBuff.get(buff[posn])))	{
 		buff[++posn] = 0;
 	}
 	max_len = posn;
 	return	(true)	;
 }
 
-
-
-//uint8_t	*	get_message	()
 
 
 /**
@@ -148,10 +163,10 @@ bool	Serial::read	(uint8_t * buff, size_t & max_len)	{
  * Returns pointer to lin_inbuff when "\r\n" terminated command line has been assembled in lin_inbuff, NULL otherwise
  */
 char *	Serial::test_for_rx_message	()	{	//	Read in any received chars into linear command line buffer
-	while	(newRx.get(ch[0]))	{			//	While there are received chars to be processed
+	while	(RxCBuff.get(ch[0]))	{			//	While there are received chars to be processed
 		if	(lin_inbuff_onptr >= DEFAULT_LIN_INBUFF_SIZE)	{	//
 			ch[0] = '\r';		//	Prevent command line buffer overrun
-			set_error (SerialErrors::INPUT_OVERRUN);	//	set error flag
+			set_error (INPUT_OVERRUN);	//	set error flag
 		}
 		switch	(in_esc_seq)	{
 		case	0:	//	Not in ESC sequence, nothing to do
@@ -191,9 +206,9 @@ char *	Serial::test_for_rx_message	()	{	//	Read in any received chars into linea
 				lin_inbuff[lin_inbuff_onptr] = '\0';
 //??	NO NO NO			write	(lin_inbuff, lin_inbuff_onptr);	//	echo received command string to originator
 				lin_inbuff_onptr = 0;	//	Could return the length here, might be useful
-				if	(test_error(SerialErrors::INPUT_OVERRUN))	{
+				if	(test_error(INPUT_OVERRUN))	{
 					write	("INPUT_OVERRUN_ERROR\r\n", 21);
-					clear_error	(SerialErrors::INPUT_OVERRUN);
+					clear_error	(INPUT_OVERRUN);
 				}	//	End of if	(test_error(SerialErrors::INPUT_OVERRUN))	{
 				time_ms_of_most_recent_rx = HAL_GetTick();
 				return	(lin_inbuff);			//	Got '\r' command terminator
@@ -211,23 +226,31 @@ char *	Serial::test_for_rx_message	()	{	//	Read in any received chars into linea
 
 
 void	Serial::report_error	()	{
+//	int32_t	rxerr = RxCBuff.get_cb_errors();
 	if	(serial_error != 0)	{
-		serial_error_history	|= serial_error;
 		char	t[44];
 		int		len;
-		len = sprintf	(t, "SERIAL ERROR CODE %ld\r\n", serial_error);
+		len = sprintf	(t, "SERIAL ERROR CODE %02lx\r\n", serial_error);
 		write	(t, len);
-		clear_error(SerialErrors::ALL);
+		clear_error(ALL);
 //		serial_error = 0;
 	}
 }
+
+
+
 //bool	Serial::test_error	(int mask)	const	{	//	Return true for error, false for no error
-bool	Serial::test_error	(SerialErrors mask)	const	{	//	Return true for error, false for no error
-	return	(serial_error & static_cast<uint32_t>(mask));	//	true for NZ result (error flag set), false for 0 or no error result
+//bool	Serial::test_error	(SerialErrors mask)	const	{	//	Return true for error, false for no error
+//	return	(serial_error & static_cast<uint32_t>(mask));	//	true for NZ result (error flag set), false for 0 or no error result
+//}
+
+
+uint32_t	Serial::test_error	(uint32_t mask)		{	//	Return errors
+	return	((serial_error	|| (RxCBuff.get_cb_errors() << 8) || (TxCBuff.get_cb_errors() << 16)) & mask);	//	true for NZ result (error flag set), false for 0 or no error result
 }
 
 
-uint32_t	Serial::clear_error	(SerialErrors bit)	{	//
+uint32_t	Serial::clear_error	(uint32_t bit)	{	//
 //	serial_error &= ~(1 << static_cast<int>(bit));
 	serial_error &= ~(static_cast<uint32_t>(bit));	//	From Dec 2024
 //	serial_error &= ~(std::to_underlying(bit));	//	C++23
@@ -235,9 +258,9 @@ uint32_t	Serial::clear_error	(SerialErrors bit)	{	//
 }
 
 
-void	Serial::set_error	(SerialErrors bit)	{
+void	Serial::set_error	(uint32_t bit)	{
 //	serial_error |=	(1 << static_cast<int>(bit));
-	serial_error |=	(static_cast<uint32_t>(bit));		//	From Dec 2024
+	serial_error |=	bit;		//	From Dec 2024
 }
 
 
@@ -256,42 +279,19 @@ void	Serial::set_error	(SerialErrors bit)	{
 bool	Serial::write	(const uint8_t * source, int32_t len)	{	//	Only puts chars on buffer.
 	if	(len < 1)
 		return	(false);			//	Can not send fewer than 1 chars !
-	int32_t	buff_space = ring_outbuff_offptr - ring_outbuff_onptr;
-	if	(buff_space <= 0)
-//		buff_space += DEFAULT_RING_OUTBUFF_SIZE;
-		buff_space += tx_ringbuff_size;
-	if	(buff_space < len)	{
-		set_error (SerialErrors::OUTPUT_OVERRUN);	//	Have proved this works
+//	if	(buff_space < len)	{			//	NO NO NO NOL NO
+	if	((int32_t)TxCBuff.buff_space() <= len)	{			//	YES YES YES YES YES
+		set_error (OUTPUT_OVERRUN);	//	Have proved this works
 		return	(false);							//	Not room to send whole message so send none of it
 	}		//	To pass here, have space to put len bytes on buffer
 
 
-/*
- * No no no, July 2025
- * This was trying to be too clever and wasn't correct
- *
- * 	int	space_to_bufftop = RING_OUTBUFF_SIZE - ring_outbuff_onptr;
-	char *	dest1 = ring_outbuff + ring_outbuff_onptr;
-	if	(len > space_to_bufftop)	{
-//		set_error (SerialErrors::SOME_OTHER);	//	Proved no problem here
-		memmove	(dest1, source, space_to_bufftop);
-		memmove	(ring_outbuff, source + space_to_bufftop, len - space_to_bufftop);
-		ring_outbuff_onptr += len;	//	which takes us beyond end of buffer
-		ring_outbuff_onptr -= RING_OUTBUFF_SIZE;
-	}
-	else	{
-		memmove	(dest1, source, len);
-		ring_outbuff_onptr += len;
-	}*/
-
 	size_t	cntjuly25 = 0;		//	This works !
 	while	(len--)	{
-		*(ring_outbuff + ring_outbuff_onptr) = source[cntjuly25++];
-//		++ring_outbuff_onptr %= DEFAULT_RING_OUTBUFF_SIZE;
-		++ring_outbuff_onptr %= tx_ringbuff_size;
+		TxCBuff.txch = source[cntjuly25++];
+		TxCBuff.put(TxCBuff.txch);	//	bool, test success or not		//	new way
 	}
 
-	tx_buff_empty = false;
 	tx_any_buffered	()	;	//	Perhaps better to leave this to be done regularly from forever loop - No Aug 2025, should be good, can't see why not
 	return	(true);
 }
@@ -303,25 +303,23 @@ bool	Serial::write	(const char * source, int32_t len)	{	//	Remembering to keep t
 
 
 bool	Serial::tx_any_buffered	()	{	//	Call this often from forever loop
-	if	(tx_buff_empty || tx_busy)		//	tx_busy true while DMA active
+	if	(tx_busy)		//	tx_busy true while DMA active
 		return	(false);
 	//	To be here, tx_buff has stuff to send, and uart tx chan is not busy
 
 	size_t	len = 0;
-	while	(!tx_buff_empty && (len < LIVE_TXBUFF_SIZE))	{
-		//
-		live_tx_buff[ len++ ] = ring_outbuff[ring_outbuff_offptr++];
-//		tx_buff_full = false;
-//		ring_outbuff_offptr %= DEFAULT_RING_OUTBUFF_SIZE;		//	circular buffer
-		ring_outbuff_offptr %= tx_ringbuff_size;		//	circular buffer
-		if(ring_outbuff_onptr == ring_outbuff_offptr)
-			tx_buff_empty = true;
+	while	(!TxCBuff.empty())	{	//	works because live_tx_buff size is same as newTx buffer size
+//		newTx.get(newTx.txch2);
+//		lin_tx_buff[ len++ ] = newTx.txch2	;
+		lin_tx_buff[ len++ ] = * TxCBuff.get()	;	//	naughty not checking for nullptr return, relying on while (!TxCBuff.empty()
 	}
+	//	newTx.empty() is now true
 	if	(len > 0)	{
-		tx_busy = true;
-		if	(HAL_OK == HAL_UART_Transmit_DMA	(m_huartn, (uint8_t *)live_tx_buff, len))
+		tx_busy = true;	//	set to false in dma finish interrupt handler
+		if	(HAL_OK == HAL_UART_Transmit_DMA	(m_huartn, (uint8_t *)lin_tx_buff, len))
 			return	(true);
-		set_error	(SerialErrors::HAL_TX_DMA);	//	HAL was not OK (Dec2024)
+		else
+			set_error	(HAL_TX_DMA);	//	HAL was not OK (Dec2024)
 	}
 return	(false);
 }
@@ -331,8 +329,9 @@ return	(false);
 //	USART Interrupt Handlers
 
 void	Serial::rx_intrpt_handler_core_DMA	()	{	//	UART has rec'd a single char, DMA has already placed it on circular buffer.
+//void	Serial::rx_intrpt_handler_core_IT	()	{	//	UART has rec'd a single char, DMA has already placed it on circular buffer.
 
-	newRx.put(rxbuff[0]);	//	New 2025 CircularBuffer. Uart Rx DMA has placed fresh char at rxbuff[0]. This copies it into circular buff
+	RxCBuff.put(rxbuff[0]);	//	New 2025 CircularBuffer. Uart Rx DMA has placed fresh char at rxbuff[0]. This copies it into circular buff
 	start_rx	()	;		//	Set DMA ready to receive next char into rxbuff[0]
 }	//	End of Serial::rx_intrpt_handler_core_DMA	()
 
@@ -341,7 +340,7 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)	{
 	int i = 0;
 	while	(MySerialPorts[i].port)	{
 		if	(huart == MySerialPorts[i].uart)	{
-			MySerialPorts[i].port->rx_intrpt_handler_core_DMA();
+			MySerialPorts[i].port->rx_intrpt_handler_core_DMA();	//	even when its IT, not DMA
 			return	;
 //			MySerialPorts[i].port->newRx.put(rxbuff[0]);	//	New 2025 CircularBuffer
 //			MySerialPorts[i].port->start_rx	()	;
@@ -367,7 +366,7 @@ void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 	int i = 0;
 	while	(MySerialPorts[i].port)	{
 		if	(huart == MySerialPorts[i].uart)
-			MySerialPorts[i].port->set_error	(SerialErrors::HAL_UART);
+			MySerialPorts[i].port->set_error	(HAL_UART_ERROR_CALLBACK);
 		i++;
 	}
 }
